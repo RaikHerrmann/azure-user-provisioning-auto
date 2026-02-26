@@ -1,0 +1,221 @@
+# ============================================================================
+# GitHub Actions: Deploy Platform Infrastructure + Function App
+# ============================================================================
+# This workflow:
+#   1. Validates Bicep templates
+#   2. Compiles per-user Bicep to ARM JSON (for Function App runtime)
+#   3. Deploys platform infrastructure (Function App, Storage, etc.)
+#   4. Packages and deploys the Function App code
+#
+# Triggers:
+#   - Push to main (infra or src changes)
+#   - Manual dispatch with parameters
+#   - Pull request (validation only)
+# ============================================================================
+
+name: Deploy Provisioning Platform
+
+on:
+  workflow_dispatch:
+    inputs:
+      location:
+        description: 'Azure region'
+        required: true
+        default: 'swedencentral'
+        type: choice
+        options:
+          - swedencentral
+          - eastus
+          - eastus2
+          - westeurope
+          - westus2
+      entra_group_id:
+        description: 'Entra ID group Object ID for auto-sync (optional)'
+        required: false
+        type: string
+      billing_scope:
+        description: 'Billing scope for subscription creation (optional)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run (what-if only)'
+        required: false
+        default: false
+        type: boolean
+
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'src/**'
+
+  pull_request:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'src/**'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  # ========================================================================
+  # Validate
+  # ========================================================================
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate Bicep - Platform
+        run: az bicep build --file infra/main.bicep --stdout > /dev/null
+
+      - name: Validate Bicep - User Environment
+        run: az bicep build --file infra/modules/userEnvironment.bicep --stdout > /dev/null
+
+      - name: Validate Function App structure
+        run: |
+          for dir in ProvisionUser ProvisionOrchestrator Activity-ResolveUser Activity-DeployEnvironment Activity-ConfigureRunbooks SyncEntraGroup DeprovisionUser; do
+            if [ ! -f "src/$dir/function.json" ] || [ ! -f "src/$dir/run.ps1" ]; then
+              echo "❌ Missing function files in src/$dir"
+              exit 1
+            fi
+          done
+          echo "✅ All function definitions valid"
+
+  # ========================================================================
+  # What-If (PRs and dry runs)
+  # ========================================================================
+  what-if:
+    name: What-If Preview
+    needs: validate
+    if: github.event_name == 'pull_request' || github.event.inputs.dry_run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: What-If Platform Deployment
+        run: |
+          az deployment sub what-if \
+            --location "${{ github.event.inputs.location || 'swedencentral' }}" \
+            --template-file infra/main.bicep \
+            --parameters \
+              location="${{ github.event.inputs.location || 'swedencentral' }}" \
+              entraGroupObjectId="${{ github.event.inputs.entra_group_id || '' }}" \
+              billingScope="${{ github.event.inputs.billing_scope || '' }}"
+
+  # ========================================================================
+  # Deploy
+  # ========================================================================
+  deploy:
+    name: Deploy Platform
+    needs: validate
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true')
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # --- Step 1: Deploy Platform Infrastructure ---
+      - name: Deploy Platform Infrastructure
+        id: platform
+        run: |
+          RESULT=$(az deployment sub create \
+            --location "${{ github.event.inputs.location || 'swedencentral' }}" \
+            --template-file infra/main.bicep \
+            --parameters \
+              location="${{ github.event.inputs.location || 'swedencentral' }}" \
+              entraGroupObjectId="${{ github.event.inputs.entra_group_id || '' }}" \
+              billingScope="${{ github.event.inputs.billing_scope || '' }}" \
+            --output json)
+
+          FUNC_APP_NAME=$(echo "$RESULT" | jq -r '.properties.outputs.functionAppName.value')
+          PLATFORM_RG=$(echo "$RESULT" | jq -r '.properties.outputs.platformResourceGroupName.value')
+          echo "functionAppName=$FUNC_APP_NAME" >> "$GITHUB_OUTPUT"
+          echo "platformRg=$PLATFORM_RG" >> "$GITHUB_OUTPUT"
+          echo "✅ Platform deployed: $FUNC_APP_NAME"
+
+      # --- Step 2: Compile per-user Bicep to ARM JSON ---
+      - name: Compile User Environment Template
+        run: |
+          mkdir -p src/templates
+          az bicep build \
+            --file infra/modules/userEnvironment.bicep \
+            --outfile src/templates/userEnvironment.json
+          echo "✅ Compiled userEnvironment.bicep → ARM JSON"
+
+      # --- Step 3: Package and Deploy Function App ---
+      - name: Package Function App
+        run: |
+          cd src
+          zip -r ../functionapp.zip . \
+            -x "local.settings.json" \
+            -x ".vscode/*" \
+            -x "__pycache__/*"
+          cd ..
+          echo "✅ Function app packaged"
+
+      - name: Deploy Function App Code
+        run: |
+          az functionapp deployment source config-zip \
+            --resource-group "${{ steps.platform.outputs.platformRg }}" \
+            --name "${{ steps.platform.outputs.functionAppName }}" \
+            --src functionapp.zip
+          echo "✅ Function app deployed"
+
+      # --- Step 4: Grant MI subscription-level Owner ---
+      - name: Configure Subscription-Level Permissions
+        run: |
+          MI_PRINCIPAL_ID=$(az functionapp identity show \
+            --resource-group "${{ steps.platform.outputs.platformRg }}" \
+            --name "${{ steps.platform.outputs.functionAppName }}" \
+            --query principalId -o tsv)
+
+          # Owner on subscription (needed for deploying user environments)
+          az role assignment create \
+            --assignee-object-id "$MI_PRINCIPAL_ID" \
+            --assignee-principal-type ServicePrincipal \
+            --role "Owner" \
+            --scope "/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            2>/dev/null || echo "Owner role already assigned"
+
+          echo "✅ Permissions configured for MI: $MI_PRINCIPAL_ID"
+
+      - name: Summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Function App | ${{ steps.platform.outputs.functionAppName }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource Group | ${{ steps.platform.outputs.platformRg }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Provision URL | https://${{ steps.platform.outputs.functionAppName }}.azurewebsites.net/api/provision |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deprovision URL | https://${{ steps.platform.outputs.functionAppName }}.azurewebsites.net/api/deprovision |" >> $GITHUB_STEP_SUMMARY

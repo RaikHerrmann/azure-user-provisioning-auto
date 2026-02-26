@@ -1,0 +1,38 @@
+# Logs
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+.vscode/
+*.swp
+*.swo
+*~
+
+# PowerShell
+*.ps1xml
+
+# Azure CLI
+.azure/
+
+# Compiled Bicep (ARM JSON)
+*.json.bak
+
+# Sensitive files
+*.pfx
+*.key
+*.pem
+secrets.json
+
+# Azure Functions
+local.settings.json
+bin/
+obj/
+
+# Node (Durable Functions extension)
+node_modules/
+
+# Compiled ARM templates (generated at build time)
+src/templates/
