@@ -140,10 +140,15 @@ azure-user-provisioning-auto/
 │   ├── host.json                            # Function App configuration
 │   ├── profile.ps1                          # PowerShell startup
 │   └── requirements.psd1                    # Az module dependencies
+├── licensing/                                # Copilot Studio license management
+│   ├── Assign-CopilotStudioLicense.ps1      # Assign licenses to users
+│   ├── Remove-CopilotStudioLicense.ps1      # Remove licenses from users
+│   └── Get-LicenseStatus.ps1                # Diagnostic: tenant & user status
 ├── .github/workflows/
 │   └── deploy.yml                           # CI/CD: deploy platform + functions
 ├── docs/
 │   ├── architecture.md                      # Detailed architecture
+│   ├── copilot-studio-licensing.md          # Copilot Studio licensing guide
 │   └── setup-guide.md                       # Step-by-step setup
 ├── .gitignore
 ├── LICENSE
@@ -202,6 +207,32 @@ Per-user overrides can be passed via the HTTP API body.
 
 ---
 
+## Copilot Studio Licensing (Optional)
+
+Assign **Microsoft Copilot Studio** per-user licenses independently from sandbox provisioning. Scripts live in the `licensing/` folder and use the Microsoft Graph API via Azure CLI tokens.
+
+```bash
+# Check tenant license status
+cd licensing
+pwsh ./Get-LicenseStatus.ps1
+
+# Preview license assignment (no changes)
+pwsh ./Assign-CopilotStudioLicense.ps1 -InputFile "./users.csv" -WhatIf
+
+# Assign licenses
+pwsh ./Assign-CopilotStudioLicense.ps1 -InputFile "./users.csv"
+```
+
+| Script | Purpose |
+|--------|---------|
+| `Assign-CopilotStudioLicense.ps1` | Assign Copilot Studio license to users from CSV/JSON |
+| `Remove-CopilotStudioLicense.ps1` | Remove Copilot Studio license from users |
+| `Get-LicenseStatus.ps1` | Show tenant SKUs and per-user license status (read-only) |
+
+See the full [Copilot Studio Licensing Guide](docs/copilot-studio-licensing.md) for prerequisites, troubleshooting, and integration details.
+
+---
+
 ## Integration Examples
 
 ### ServiceNow / HR System
@@ -221,6 +252,7 @@ Subscribe to Entra ID audit log events and route to the Function App.
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Detailed architecture and design decisions |
 | [Setup Guide](docs/setup-guide.md) | Step-by-step deployment instructions |
+| [Copilot Studio Licensing](docs/copilot-studio-licensing.md) | License assignment scripts and guide |
 
 ---
 
