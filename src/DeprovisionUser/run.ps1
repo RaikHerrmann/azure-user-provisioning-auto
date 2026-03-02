@@ -4,17 +4,35 @@
 
 .DESCRIPTION
     POST /api/deprovision
+    Headers:
+        X-API-Key: <your-api-key>
     Body:
     {
         "userPrincipalName": "john.doe@contoso.com",
-        "subscriptionId": "xxxx-xxxx"
+        "subscriptionId": "xxxx-xxxx"  // optional — auto-detected if omitted
     }
 
     Removes the resource group, RBAC assignments, and policy for the user.
+    If subscriptionId is not provided, the function searches all configured
+    target subscriptions (TARGET_SUBSCRIPTION_IDS) for the user's RG.
 #>
 using namespace System.Net
 
 param($Request, $TriggerMetadata)
+
+# === Validate API Key ===
+$expectedKey = $env:WEBHOOK_API_KEY
+if ($expectedKey) {
+    $providedKey = $Request.Headers['X-API-Key']
+    if ($providedKey -ne $expectedKey) {
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+            StatusCode = [HttpStatusCode]::Unauthorized
+            Body       = '{"error": "Invalid or missing API key. Provide a valid X-API-Key header."}'
+            Headers    = @{ 'Content-Type' = 'application/json' }
+        })
+        return
+    }
+}
 
 $body = $Request.Body
 
@@ -32,13 +50,51 @@ $subscriptionId = $body.subscriptionId
 
 Write-Host "Deprovisioning user: $upn"
 
+$sanitized = $upn.ToLower() -replace '@', '-' -replace '\.', '-'
+$rgName = "rg-$sanitized"
+
 try {
+    # === Locate the user's resource group ===
     if ($subscriptionId) {
+        # Caller specified the subscription
         Set-AzContext -SubscriptionId $subscriptionId -ErrorAction Stop
     }
+    else {
+        # Search configured target subscriptions for the user's RG
+        Write-Host "No subscriptionId provided. Searching target subscriptions for RG: $rgName"
+        $targetSubscriptionIds = ($env:TARGET_SUBSCRIPTION_IDS -split '[,;\s]+') | Where-Object { $_ -ne '' }
 
-    $sanitized = $upn.ToLower() -replace '@', '-' -replace '\.', '-'
-    $rgName = "rg-$sanitized"
+        if (-not $targetSubscriptionIds -or $targetSubscriptionIds.Count -eq 0) {
+            # Fallback: use current context
+            $targetSubscriptionIds = @((Get-AzContext).Subscription.Id)
+        }
+
+        $found = $false
+        foreach ($subId in $targetSubscriptionIds) {
+            try {
+                Set-AzContext -SubscriptionId $subId -ErrorAction Stop | Out-Null
+                $rg = Get-AzResourceGroup -Name $rgName -ErrorAction SilentlyContinue
+                if ($rg) {
+                    $subscriptionId = $subId
+                    $found = $true
+                    Write-Host "Found RG '$rgName' in subscription: $subId"
+                    break
+                }
+            }
+            catch {
+                Write-Warning "Cannot access subscription $subId — skipping."
+            }
+        }
+
+        if (-not $found) {
+            Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+                StatusCode = [HttpStatusCode]::NotFound
+                Body       = (@{ error = "Resource group '$rgName' not found in any configured subscription." } | ConvertTo-Json)
+                Headers    = @{ 'Content-Type' = 'application/json' }
+            })
+            return
+        }
+    }
 
     # Check if resource group exists
     $rg = Get-AzResourceGroup -Name $rgName -ErrorAction SilentlyContinue

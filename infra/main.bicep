@@ -37,8 +37,15 @@ param namePrefix string = 'userprov'
 @description('Entra ID security group Object ID to sync for auto-provisioning (optional)')
 param entraGroupObjectId string = ''
 
-@description('Billing scope for automatic subscription creation (optional)')
-param billingScope string = ''
+@description('Comma-separated list of target subscription IDs for deploying user resource groups')
+param targetSubscriptionIds string = ''
+
+@description('Maximum number of resource groups per subscription before overflow to next (Azure limit: ~980)')
+param maxRgsPerSubscription int = 950
+
+@description('API key for webhook authentication (callers must send X-API-Key header). Leave empty to rely only on function keys.')
+@secure()
+param webhookApiKey string = ''
 
 @description('Default warning budget threshold (USD)')
 param defaultWarningBudget int = 15
@@ -75,7 +82,9 @@ module functionApp 'modules/functionApp.bicep' = {
     namePrefix: namePrefix
     uniqueSuffix: uniqueSuffix
     entraGroupObjectId: entraGroupObjectId
-    billingScope: billingScope
+    targetSubscriptionIds: targetSubscriptionIds
+    maxRgsPerSubscription: maxRgsPerSubscription
+    webhookApiKey: webhookApiKey
     defaultWarningBudget: defaultWarningBudget
     defaultHardLimitBudget: defaultHardLimitBudget
     defaultGracePeriodDays: defaultGracePeriodDays

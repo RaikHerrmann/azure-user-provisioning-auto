@@ -8,11 +8,10 @@ This guide walks through deploying the event-driven provisioning platform from s
 
 | Requirement | Details |
 |-------------|---------|
-| **Azure Subscription** | With Owner permissions |
+| **Azure Subscription** | One or more, with Owner permissions |
 | **Entra ID** | Global Reader or User.Read.All (for user lookups) |
 | **GitHub Repository** | With Actions enabled |
 | **Azure CLI** | ≥ 2.60 (`az --version`) |
-| **Billing Account** | (Optional) For automatic subscription creation |
 
 ---
 
@@ -119,17 +118,18 @@ az rest --method POST \
 ```bash
 # Get the function key from Azure Portal (Function App → App Keys → default)
 FUNC_KEY="<your-function-key>"
+API_KEY="<your-webhook-api-key>"
 FUNC_URL="https://<func-app-name>.azurewebsites.net"
 
 # Provision a user
 curl -X POST "$FUNC_URL/api/provision?code=$FUNC_KEY" \
     -H "Content-Type: application/json" \
+    -H "X-API-Key: $API_KEY" \
     -d '{
         "userPrincipalName": "john.doe@contoso.com",
         "displayName": "John Doe",
         "email": "john.doe@contoso.com",
-        "department": "Engineering",
-        "subscriptionId": "<existing-subscription-id>"
+        "department": "Engineering"
     }'
 
 # Response: 202 Accepted with statusQueryGetUri for tracking
@@ -180,7 +180,9 @@ All configuration is via Function App **Application Settings** (set during Bicep
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `ENTRA_GROUP_OBJECT_ID` | _(empty)_ | Entra ID group to sync for auto-provisioning |
-| `BILLING_SCOPE` | _(empty)_ | Billing scope for subscription creation |
+| `TARGET_SUBSCRIPTION_IDS` | _(empty)_ | Comma-separated subscription IDs for user RG deployment |
+| `MAX_RGS_PER_SUBSCRIPTION` | `950` | Max RGs per subscription (Azure limit: ~980) |
+| `WEBHOOK_API_KEY` | _(empty)_ | API key callers must provide via `X-API-Key` header |
 | `DEFAULT_LOCATION` | `swedencentral` | Azure region for user environments |
 | `DEFAULT_WARNING_BUDGET` | `15` | Warning threshold (USD) |
 | `DEFAULT_HARD_LIMIT_BUDGET` | `20` | Hard limit (USD) |
@@ -197,5 +199,5 @@ All configuration is via Function App **Application Settings** (set during Bicep
 | User not found in Entra ID | Ensure MI has `Directory.Read.All`; check user exists in tenant |
 | Deployment fails | Check MI has Owner on the target subscription |
 | Timer not firing | Verify `SYNC_SCHEDULE` and `ENTRA_GROUP_OBJECT_ID` are set |
-| Subscription creation fails | Verify `BILLING_SCOPE` is correct for your billing type |
+| All subscriptions full | Add more subscription IDs to `TARGET_SUBSCRIPTION_IDS` |
 | Orchestration stuck | Check Durable Functions task hub in Storage Account (`UserProvisioningHub*` tables) |

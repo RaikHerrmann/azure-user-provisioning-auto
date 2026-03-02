@@ -18,7 +18,7 @@ An **Azure Function App** (PowerShell + Durable Functions) runs in Azure and rea
 
 Each provisioned user receives the **same isolated sandbox** as the batch solution:
 
-- Own subscription + resource group (isolated from other users)
+- Dedicated resource group within a shared subscription (scales by adding more subscriptions)
 - Azure AI Foundry (Hub + Project) with storage, Key Vault, monitoring
 - Tamper-proof cost controls ($15 warning, $20 hard enforcement)
 - Automatic enforcement: read-only → resource stop → 5-day grace → deletion
@@ -32,13 +32,13 @@ Each provisioned user receives the **same isolated sandbox** as the batch soluti
   ───────                     ──────────────────                ────────────────────
                               ┌──────────────────────────┐
   POST /api/provision ──────▶ │  Durable Orchestrator     │     ┌──────────────────┐
-                              │                          │ ──▶ │ Subscription      │
-  Entra ID Group Sync ──────▶ │  1. Resolve User          │     │ ├── Resource Group│
-  (timer, every 10 min)       │  2. Create Subscription   │     │ │   ├── AI Foundry│
-                              │  3. Deploy Bicep (IaC)    │     │ │   ├── Budget    │
-  POST /api/deprovision ────▶ │  4. Configure Runbooks    │     │ │   ├── Automation│
-                              │                          │     │ │   └── RBAC      │
-                              └──────────────────────────┘     └──────────────────┘
+  + X-API-Key header          │                          │ ──▶ │ Subscription(s)   │
+  Entra ID Group Sync ──────▶ │  1. Resolve User          │     │ ├── rg-user-a     │
+  (timer, every 10 min)       │  2. Select Subscription   │     │ ├── rg-user-b     │
+                              │  3. Deploy Bicep (IaC)    │     │ ├── rg-user-c     │
+  POST /api/deprovision ────▶ │  4. Configure Runbooks    │     │ └── ... (up to 950)│
+  + X-API-Key header          │                          │     └──────────────────┘
+                              └──────────────────────────┘
 ```
 
 See the full [Architecture](docs/architecture.md) document for detailed diagrams.
@@ -55,7 +55,7 @@ The CI/CD pipeline deploys everything automatically on push to `main`. Set up th
 |--------|-------|
 | `AZURE_CLIENT_ID` | Service principal App ID |
 | `AZURE_TENANT_ID` | Entra ID tenant ID |
-| `AZURE_SUBSCRIPTION_ID` | Target subscription ID |
+| `AZURE_SUBSCRIPTION_ID` | Platform subscription ID |
 
 Then push to `main` or trigger the workflow manually.
 
@@ -65,8 +65,9 @@ See the [Setup Guide](docs/setup-guide.md) for detailed steps.
 
 **Option A — API call** (from any system):
 ```bash
-curl -X POST "https://<func-app>.azurewebsites.net/api/provision?code=<key>" \
+curl -X POST "https://<func-app>.azurewebsites.net/api/provision?code=<function-key>" \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: <your-api-key>" \
   -d '{
     "userPrincipalName": "john.doe@contoso.com",
     "displayName": "John Doe",
@@ -84,10 +85,13 @@ az ad group member add --group "AI Sandbox Users" --member-id "<user-object-id>"
 ### 3. Deprovision Users
 
 ```bash
-curl -X POST "https://<func-app>.azurewebsites.net/api/deprovision?code=<key>" \
+curl -X POST "https://<func-app>.azurewebsites.net/api/deprovision?code=<function-key>" \
   -H "Content-Type: application/json" \
-  -d '{"userPrincipalName": "john.doe@contoso.com", "subscriptionId": "xxx"}'
+  -H "X-API-Key: <your-api-key>" \
+  -d '{"userPrincipalName": "john.doe@contoso.com"}'
 ```
+
+> **Note:** `subscriptionId` is optional in the deprovision call — the function auto-detects which subscription holds the user's RG.
 
 ---
 
@@ -99,8 +103,10 @@ curl -X POST "https://<func-app>.azurewebsites.net/api/deprovision?code=<key>" \
 | Where it runs | Admin's machine / GitHub Actions runner | Azure Function App (always running in Azure) |
 | Trigger | Manual script execution | HTTP webhook / timer / Entra ID group change |
 | Granularity | Batch (all users at once) | Single user (on demand) |
+| Scaling model | One subscription per user | Resource groups within shared subscriptions |
 | Long-running ops | Sequential PowerShell | Durable Functions (retry, status tracking) |
 | Per-user infra | Bicep modules | Same Bicep modules (unchanged) |
+| Webhook auth | N/A | Function key + custom API key (X-API-Key header) |
 
 ---
 
@@ -122,7 +128,7 @@ azure-user-provisioning-auto/
 │   ├── ProvisionUser/                       # HTTP trigger → start orchestration
 │   ├── ProvisionOrchestrator/               # Durable orchestrator
 │   ├── Activity-ResolveUser/                # Activity: Entra ID lookup
-│   ├── Activity-CreateSubscription/         # Activity: subscription creation
+│   ├── Activity-SelectSubscription/         # Activity: pick sub with RG capacity
 │   ├── Activity-DeployEnvironment/          # Activity: Bicep deployment
 │   ├── Activity-ConfigureRunbooks/          # Activity: runbook upload + webhook
 │   ├── SyncEntraGroup/                      # Timer trigger: group sync
@@ -157,8 +163,12 @@ Identical to the batch solution — three layers of protection:
 | 3 | **Azure Policy** | Naming convention guardrail (`rg-*`) |
 
 The Function App's Managed Identity has:
-- **Owner** on the target subscription (for deployments + RBAC)
+- **Owner** on target subscription(s) (for deployments + RBAC)
 - **Directory.Read.All** on Microsoft Graph (for Entra ID lookups)
+
+HTTP endpoints are protected by two layers:
+- **Azure Function keys** (require `?code=<function-key>` query parameter)
+- **Custom API key** (require `X-API-Key: <key>` header when `WEBHOOK_API_KEY` is configured)
 
 ---
 
@@ -179,7 +189,9 @@ All settings are managed via Function App Application Settings:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `ENTRA_GROUP_OBJECT_ID` | _(empty)_ | Security group for auto-provisioning |
-| `BILLING_SCOPE` | _(empty)_ | For automatic subscription creation |
+| `TARGET_SUBSCRIPTION_IDS` | _(empty)_ | Comma-separated subscription IDs for user RG deployment |
+| `MAX_RGS_PER_SUBSCRIPTION` | `950` | Max resource groups per subscription before overflow |
+| `WEBHOOK_API_KEY` | _(empty)_ | API key callers must send via `X-API-Key` header |
 | `DEFAULT_LOCATION` | `swedencentral` | Azure region |
 | `DEFAULT_WARNING_BUDGET` | `15` | Warning threshold (USD) |
 | `DEFAULT_HARD_LIMIT_BUDGET` | `20` | Hard limit (USD) |

@@ -5,7 +5,7 @@
 .DESCRIPTION
     Orchestration steps:
       1. Resolve user in Entra ID (get Object ID)
-      2. Create subscription if needed (under shared billing account)
+      2. Select a target subscription with available RG capacity
       3. Deploy Bicep environment (RG, RBAC, AI Foundry, Budget, Automation)
       4. Configure runbooks (upload scripts, wire webhooks)
 
@@ -34,31 +34,19 @@ if (-not $resolvedUser -or -not $resolvedUser.objectId) {
 $input.userObjectId = $resolvedUser.objectId
 Write-Host "User resolved: $($input.userPrincipalName) -> $($resolvedUser.objectId)"
 
-# === Step 2: Create Subscription (if needed) ===
-if (-not $input.subscriptionId -and $input.billingScope) {
-    $subscriptionResult = Invoke-DurableActivity -FunctionName 'Activity-CreateSubscription' -Input $input -RetryOptions $retryOptions
-    if ($subscriptionResult -and $subscriptionResult.subscriptionId) {
-        $input.subscriptionId = $subscriptionResult.subscriptionId
-        Write-Host "Subscription created: $($subscriptionResult.subscriptionId)"
-    } else {
-        Write-Host "FAILED: Could not create subscription for $($input.userPrincipalName)."
-        return @{
-            status  = 'Failed'
-            user    = $input.userPrincipalName
-            reason  = 'Subscription creation failed'
-            step    = 'CreateSubscription'
-        }
-    }
-}
-
-# If still no subscription, fail
-if (-not $input.subscriptionId) {
-    Write-Host "FAILED: No subscription ID available for $($input.userPrincipalName)."
+# === Step 2: Select Subscription (with available RG capacity) ===
+$subscriptionResult = Invoke-DurableActivity -FunctionName 'Activity-SelectSubscription' -Input $input -RetryOptions $retryOptions
+if ($subscriptionResult -and $subscriptionResult.subscriptionId) {
+    $input.subscriptionId = $subscriptionResult.subscriptionId
+    Write-Host "Subscription selected: $($subscriptionResult.subscriptionId) ($($subscriptionResult.rgCount) RGs in use)"
+} else {
+    $errorMsg = if ($subscriptionResult.error) { $subscriptionResult.error } else { 'No subscription with available RG capacity' }
+    Write-Host "FAILED: Could not select subscription for $($input.userPrincipalName). $errorMsg"
     return @{
         status  = 'Failed'
         user    = $input.userPrincipalName
-        reason  = 'No subscription ID provided and no billing scope for auto-creation'
-        step    = 'CreateSubscription'
+        reason  = $errorMsg
+        step    = 'SelectSubscription'
     }
 }
 

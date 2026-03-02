@@ -33,8 +33,12 @@ on:
         description: 'Entra ID group Object ID for auto-sync (optional)'
         required: false
         type: string
-      billing_scope:
-        description: 'Billing scope for subscription creation (optional)'
+      target_subscription_ids:
+        description: 'Comma-separated target subscription IDs for user RGs'
+        required: false
+        type: string
+      webhook_api_key:
+        description: 'API key for webhook authentication (X-API-Key header)'
         required: false
         type: string
       dry_run:
@@ -89,7 +93,7 @@ jobs:
 
       - name: Validate Function App structure
         run: |
-          for dir in ProvisionUser ProvisionOrchestrator Activity-ResolveUser Activity-DeployEnvironment Activity-ConfigureRunbooks SyncEntraGroup DeprovisionUser; do
+          for dir in ProvisionUser ProvisionOrchestrator Activity-ResolveUser Activity-SelectSubscription Activity-DeployEnvironment Activity-ConfigureRunbooks SyncEntraGroup DeprovisionUser; do
             if [ ! -f "src/$dir/function.json" ] || [ ! -f "src/$dir/run.ps1" ]; then
               echo "❌ Missing function files in src/$dir"
               exit 1
@@ -123,7 +127,7 @@ jobs:
             --parameters \
               location="${{ github.event.inputs.location || 'swedencentral' }}" \
               entraGroupObjectId="${{ github.event.inputs.entra_group_id || '' }}" \
-              billingScope="${{ github.event.inputs.billing_scope || '' }}"
+              targetSubscriptionIds="${{ github.event.inputs.target_subscription_ids || '' }}"
 
   # ========================================================================
   # Deploy
@@ -154,7 +158,8 @@ jobs:
             --parameters \
               location="${{ github.event.inputs.location || 'swedencentral' }}" \
               entraGroupObjectId="${{ github.event.inputs.entra_group_id || '' }}" \
-              billingScope="${{ github.event.inputs.billing_scope || '' }}" \
+              targetSubscriptionIds="${{ github.event.inputs.target_subscription_ids || '' }}" \
+              webhookApiKey="${{ github.event.inputs.webhook_api_key || '' }}" \
             --output json)
 
           FUNC_APP_NAME=$(echo "$RESULT" | jq -r '.properties.outputs.functionAppName.value')

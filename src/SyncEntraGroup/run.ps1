@@ -47,8 +47,13 @@ try {
     if ($members.Count -eq 0) { return }
 
     # === Check which users are already provisioned ===
-    # We use a simple convention: if rg-{sanitized-upn} exists, the user is provisioned.
+    # We use a simple convention: if rg-{sanitized-upn} exists in any target subscription, the user is provisioned.
     $provisionedUsers = @{}
+    $targetSubscriptionIds = ($env:TARGET_SUBSCRIPTION_IDS -split '[,;\s]+') | Where-Object { $_ -ne '' }
+
+    if (-not $targetSubscriptionIds -or $targetSubscriptionIds.Count -eq 0) {
+        $targetSubscriptionIds = @((Get-AzContext).Subscription.Id)
+    }
 
     foreach ($member in $members) {
         $upn = $member.userPrincipalName
@@ -57,10 +62,19 @@ try {
         $sanitized = $upn.ToLower() -replace '@', '-' -replace '\.', '-'
         $rgName = "rg-$sanitized"
 
-        # Check if resource group exists in any subscription we have access to
-        $existing = Get-AzResourceGroup -Name $rgName -ErrorAction SilentlyContinue
-        if ($existing) {
-            $provisionedUsers[$upn] = $true
+        # Check if resource group exists in any target subscription
+        foreach ($subId in $targetSubscriptionIds) {
+            try {
+                Set-AzContext -SubscriptionId $subId -ErrorAction Stop | Out-Null
+                $existing = Get-AzResourceGroup -Name $rgName -ErrorAction SilentlyContinue
+                if ($existing) {
+                    $provisionedUsers[$upn] = $true
+                    break
+                }
+            }
+            catch {
+                # Skip inaccessible subscriptions
+            }
         }
     }
 
@@ -85,7 +99,6 @@ try {
             warningBudget     = [int]$env:DEFAULT_WARNING_BUDGET
             hardLimitBudget   = [int]$env:DEFAULT_HARD_LIMIT_BUDGET
             gracePeriodDays   = [int]$env:DEFAULT_GRACE_PERIOD_DAYS
-            billingScope      = $env:BILLING_SCOPE
         }
 
         Write-Host "Starting provisioning for: $($member.userPrincipalName)"

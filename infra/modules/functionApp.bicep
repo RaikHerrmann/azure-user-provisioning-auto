@@ -25,8 +25,15 @@ param uniqueSuffix string
 @description('Entra ID group Object ID for sync')
 param entraGroupObjectId string
 
-@description('Billing scope for subscription creation')
-param billingScope string
+@description('Target subscription IDs (comma-separated) for user RG deployment')
+param targetSubscriptionIds string
+
+@description('Max resource groups per subscription')
+param maxRgsPerSubscription int
+
+@description('API key for webhook authentication')
+@secure()
+param webhookApiKey string
 
 @description('Default warning budget (USD)')
 param defaultWarningBudget int
@@ -158,8 +165,16 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
           value: entraGroupObjectId
         }
         {
-          name: 'BILLING_SCOPE'
-          value: billingScope
+          name: 'TARGET_SUBSCRIPTION_IDS'
+          value: targetSubscriptionIds
+        }
+        {
+          name: 'MAX_RGS_PER_SUBSCRIPTION'
+          value: string(maxRgsPerSubscription)
+        }
+        {
+          name: 'WEBHOOK_API_KEY'
+          value: webhookApiKey
         }
         {
           name: 'DEFAULT_LOCATION'

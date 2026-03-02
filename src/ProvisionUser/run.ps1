@@ -6,7 +6,11 @@
     Accepts a POST request with user details and starts the Durable Functions
     orchestrator to provision their sandbox environment.
 
+    Requires a valid X-API-Key header (when WEBHOOK_API_KEY is configured).
+
     POST /api/provision
+    Headers:
+        X-API-Key: <your-api-key>
     Body:
     {
         "userPrincipalName": "john.doe@contoso.com",
@@ -14,7 +18,7 @@
         "email": "john.doe@contoso.com",
         "department": "Engineering",
         "costCenter": "CC-1001",
-        "subscriptionId": "",           // optional: use existing subscription
+        "subscriptionId": "",           // optional: pin to specific subscription
         "location": "swedencentral",    // optional: override default region
         "warningBudget": 15,            // optional
         "hardLimitBudget": 20,          // optional
@@ -28,6 +32,20 @@ using namespace System.Net
 param($Request, $TriggerMetadata)
 
 Import-Module "$PSScriptRoot/../modules/Helpers.psm1" -Force
+
+# === Validate API Key ===
+$expectedKey = $env:WEBHOOK_API_KEY
+if ($expectedKey) {
+    $providedKey = $Request.Headers['X-API-Key']
+    if ($providedKey -ne $expectedKey) {
+        Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+            StatusCode = [HttpStatusCode]::Unauthorized
+            Body       = '{"error": "Invalid or missing API key. Provide a valid X-API-Key header."}'
+            Headers    = @{ 'Content-Type' = 'application/json' }
+        })
+        return
+    }
+}
 
 # === Validate Request Body ===
 $body = $Request.Body
@@ -65,7 +83,6 @@ $provisioningInput = @{
     warningBudget     = if ($body.warningBudget) { [int]$body.warningBudget } else { [int]$env:DEFAULT_WARNING_BUDGET }
     hardLimitBudget   = if ($body.hardLimitBudget) { [int]$body.hardLimitBudget } else { [int]$env:DEFAULT_HARD_LIMIT_BUDGET }
     gracePeriodDays   = if ($body.gracePeriodDays) { [int]$body.gracePeriodDays } else { [int]$env:DEFAULT_GRACE_PERIOD_DAYS }
-    billingScope      = $env:BILLING_SCOPE
 }
 
 Write-Host "Starting provisioning orchestration for $($provisioningInput.userPrincipalName)"

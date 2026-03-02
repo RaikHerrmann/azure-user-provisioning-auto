@@ -27,11 +27,11 @@ This solution replaces the batch CSV-based provisioning model with an **event-dr
 │  │                                                                       │  │
 │  │   Step 1           Step 2              Step 3            Step 4       │  │
 │  │  ┌───────────┐   ┌────────────────┐  ┌──────────────┐  ┌──────────┐  │  │
-│  │  │  Resolve   │──▶│  Create Sub    │──▶│  Deploy      │──▶│ Configure│  │  │
-│  │  │  User in   │   │  (if needed,   │  │  Bicep       │  │ Runbooks │  │  │
-│  │  │  Entra ID  │   │  via billing)  │  │  Environment │  │ + Webhook│  │  │
-│  │  └───────────┘   └────────────────┘  └──────────────┘  └──────────┘  │  │
-│  │                                                                       │  │
+│  │  │  Resolve   │──▶│  Select Sub    │──▶│  Deploy      │──▶│ Configure│  │  │
+│  │  │  User in   │   │  (pick one w/  │  │  Bicep       │  │ Runbooks │  │  │
+│  │  │  Entra ID  │   │  available RG  │  │  Environment │  │ + Webhook│  │  │
+│  │  └───────────┘   │  capacity)     │  └──────────────┘  └──────────┘  │  │
+│  │                   └────────────────┘                                   │  │
 │  └───────────────────────────────────────────────────────────────────────┘  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -41,17 +41,29 @@ This solution replaces the batch CSV-based provisioning model with an **event-dr
 │                    Per-User Azure Environment (same as before)               │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  ┌─── Subscription (under shared billing account) ────────────────────────┐│
-│  │  ┌─── Resource Group (rg-{user}) ──────────────────────────────────┐   ││
+│  ┌─── Subscription(s) (shared, with RG-per-user isolation) ───────────────┐│
+│  │  ┌─── rg-user-a ──────────────────────────────────────────────────┐   ││
 │  │  │  AI Foundry Hub + Project │ Key Vault │ Storage │ App Insights  │   ││
 │  │  │  Automation Account       │ Budget    │ Action Groups           │   ││
 │  │  │  Custom RBAC (Sandbox Contributor) │ Policy (naming guardrail)  │   ││
+│  │  └────────────────────────────────────────────────────────────────┘   ││
+│  │  ┌─── rg-user-b ──────────────────────────────────────────────────┐   ││
+│  │  │  ... (same structure, up to MAX_RGS_PER_SUBSCRIPTION)           │   ││
 │  │  └────────────────────────────────────────────────────────────────┘   ││
 │  └──────────────────────────────────────────────────────────────────────┘││
 │                                                                             │
 │  Cost Enforcement: $15 warn → $20 enforce → 5-day grace → auto-delete      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Scaling Model
+
+The solution scales horizontally via **resource groups within shared subscriptions**:
+
+1. Configure one or more target subscriptions in `TARGET_SUBSCRIPTION_IDS`
+2. Each new user gets their own resource group (`rg-{sanitized-upn}`) in a subscription with capacity
+3. When a subscription reaches `MAX_RGS_PER_SUBSCRIPTION` (default: 950), the next user spills over to the next subscription
+4. Azure's limit is ~980 RGs per subscription; the default 950 provides headroom for platform RGs
 
 ## What Changed from the Batch Solution
 
@@ -70,10 +82,12 @@ This solution replaces the batch CSV-based provisioning model with an **event-dr
 
 ### 1. HTTP Webhook (POST /api/provision)
 
-External systems (HR tools, ServiceNow, custom apps) call the API directly:
+External systems (HR tools, ServiceNow, custom apps) call the API directly.
+Requires both a **function key** (`?code=`) and an **API key** (`X-API-Key` header):
 
 ```json
 POST https://<function-app>.azurewebsites.net/api/provision?code=<function-key>
+X-API-Key: <your-webhook-api-key>
 {
     "userPrincipalName": "john.doe@contoso.com",
     "displayName": "John Doe",
@@ -90,21 +104,23 @@ Add users to a designated Entra ID security group. The timer function checks eve
 
 ### 3. Deprovision API (POST /api/deprovision)
 
-Remove a user's environment when they leave:
+Remove a user's environment when they leave. The subscription is auto-detected:
 
 ```json
 POST https://<function-app>.azurewebsites.net/api/deprovision?code=<function-key>
+X-API-Key: <your-webhook-api-key>
 {
-    "userPrincipalName": "john.doe@contoso.com",
-    "subscriptionId": "xxxx-xxxx"
+    "userPrincipalName": "john.doe@contoso.com"
 }
 ```
 
 ## Security
 
 - Function App uses **System-Assigned Managed Identity** — no credentials stored
-- HTTP endpoints protected by **function keys** (require `?code=` parameter)
-- MI has **Owner** on the target subscription (minimum for RBAC + deployments)
+- HTTP endpoints protected by **two layers**:
+  - **Function keys** (require `?code=` parameter) — built-in Azure Functions auth
+  - **Custom API key** (require `X-API-Key` header) — set via `WEBHOOK_API_KEY` app setting
+- MI has **Owner** on the target subscription(s) (minimum for RBAC + deployments)
 - MI has **Directory.Read.All** on Microsoft Graph (for Entra ID lookups)
 - Per-user security model is identical to the batch solution (3-layer protection)
 
